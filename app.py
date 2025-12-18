@@ -33,19 +33,34 @@ def max_drawdown(returns):
     drawdown = (cumulative - peak) / peak
     return drawdown.min() * 100
 
+
+@st.cache_data(ttl=3600)
+def get_usd_inr_rate():
+    try:
+        fx = yf.download("USDINR=X", period="5d", threads=False)
+        return float(fx["Close"].iloc[-1])
+    except Exception:
+        return 83.0  # safe fallback
+
+
 @st.cache_data(ttl=1800)
 def fetch_stock_data(symbols, period):
     return yf.download(
         symbols,
         period=period,
         group_by="ticker",
-        threads=False
+        threads=False,
+        auto_adjust=False
     )
 
 
-def build_stock_table(symbols, period):
-    rows = []
+def build_stock_table(symbols, period, currency):
+    rows = {}
     price_data = {}
+
+    usd_inr = get_usd_inr_rate()
+    multiplier = usd_inr if currency == "INR" else 1
+    currency_symbol = "₹" if currency == "INR" else "$"
 
     try:
         data = fetch_stock_data(symbols, period)
@@ -55,38 +70,45 @@ def build_stock_table(symbols, period):
 
     for symbol in symbols:
         try:
-            hist = data[symbol].dropna()
-            if hist.empty:
+            hist = data if len(symbols) == 1 else data[symbol]
+            hist = hist.dropna()
+
+            if hist.empty or "Close" not in hist:
                 continue
 
-            start = hist["Close"].iloc[0]
-            end = hist["Close"].iloc[-1]
-            returns = hist["Close"].pct_change().dropna()
-            years = len(hist) / 252
+            close = hist["Close"].astype(float)
+            start = float(close.iloc[0])
+            end = float(close.iloc[-1])
+
+            returns = close.pct_change().dropna()
+            years = len(close) / 252
 
             cagr = ((end / start) ** (1 / years) - 1) * 100
             vol = returns.std() * 100
             mdd = max_drawdown(returns)
             ret_pct = ((end - start) / start) * 100
 
-            rows.append({
+            rows[symbol] = {
                 "Stock": symbol,
-                "Start Price ($)": round(start, 2),
-                "End Price ($)": round(end, 2),
+                f"Start Price ({currency_symbol})": round(start * multiplier, 2),
+                f"End Price ({currency_symbol})": round(end * multiplier, 2),
                 "Return (%)": round(ret_pct, 2),
                 "CAGR (%)": round(cagr, 2),
                 "Volatility (%)": round(vol, 2),
                 "Risk Score": risk_score(vol),
                 "Max Drawdown (%)": round(mdd, 2),
                 "Recommendation": buy_hold_sell(ret_pct)
-            })
+            }
 
-            price_data[symbol] = hist["Close"]
+            price_data[symbol] = (close * multiplier).to_numpy()
 
         except Exception:
             continue
 
-    return pd.DataFrame(rows), pd.DataFrame(price_data)
+    summary_df = pd.DataFrame(rows.values())
+    price_df = pd.DataFrame(price_data, index=hist.index)
+
+    return summary_df, price_df
 
 
 st.set_page_config(
@@ -112,15 +134,19 @@ period = st.sidebar.selectbox(
     ["3mo", "6mo", "1y", "2y"]
 )
 
+currency = st.sidebar.selectbox(
+    "Currency",
+    ["USD", "INR"]
+)
+
 capital = st.sidebar.number_input(
-    "Total Capital ($)",
+    f"Total Capital ({'₹' if currency == 'INR' else '$'})",
     min_value=1000,
     value=100000,
     step=1000
 )
 
 symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
-
 
 if "summary_df" not in st.session_state:
     st.session_state.summary_df = None
@@ -129,7 +155,7 @@ if "summary_df" not in st.session_state:
 
 if st.sidebar.button("Generate Report"):
 
-    summary_df, price_df = build_stock_table(symbols, period)
+    summary_df, price_df = build_stock_table(symbols, period, currency)
 
     if summary_df.empty:
         st.warning("No valid stock data found.")
@@ -137,7 +163,6 @@ if st.sidebar.button("Generate Report"):
 
     st.session_state.summary_df = summary_df
     st.session_state.price_df = price_df
-
 
 
 if st.session_state.summary_df is not None:
@@ -153,14 +178,19 @@ if st.session_state.summary_df is not None:
     alloc_df = pd.DataFrame({
         "Stock": df["Stock"],
         "Allocation (%)": (weights * 100).round(2),
-        "Capital ($)": (weights * capital).round(2)
+        f"Capital ({'₹' if currency == 'INR' else '$'})": (weights * capital).round(2)
     })
     st.dataframe(alloc_df, use_container_width=True)
 
     st.subheader("📈 Price Trend")
     fig = go.Figure()
     for col in prices.columns:
-        fig.add_trace(go.Scatter(x=prices.index, y=prices[col], mode="lines", name=col))
+        fig.add_trace(go.Scatter(
+            x=prices.index,
+            y=prices[col],
+            mode="lines",
+            name=col
+        ))
     fig.update_layout(template="plotly_dark")
     st.plotly_chart(fig, use_container_width=True)
 
@@ -173,7 +203,7 @@ if st.session_state.summary_df is not None:
     st.download_button(
         label="Download CSV",
         data=df.to_csv(index=False),
-        file_name="investment_report.csv",
+        file_name=f"investment_report_{currency}.csv",
         mime="text/csv"
     )
 

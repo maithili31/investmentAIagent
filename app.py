@@ -40,7 +40,7 @@ def get_usd_inr_rate():
         fx = yf.download("USDINR=X", period="5d", threads=False)
         return float(fx["Close"].iloc[-1])
     except Exception:
-        return 83.0  # safe fallback
+        return 83.0 
 
 
 @st.cache_data(ttl=1800)

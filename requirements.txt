@@ -6,3 +6,4 @@ plotly
 agno
 google-generativeai
 python-dotenv
+google-genai
